@@ -157,7 +157,7 @@
  *     M09
  *     G28 U0 W0
  * - Remove cutoff/part-off block (since you part off by hand)
- * - Enforce tool calls ONLY 01–08
+ * - If out-of-range tools are found (anything not 01–08), prompt the user to SWAP them to a tool 01–08
  * - For every tool line, inject:
  *     M05
  *     M00 (...)  (manual stop)
@@ -169,7 +169,6 @@
  */
 
 const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
-const ANY_TOOL_TOK_RE = /\bT(\d{2})(\d{2})\b/i;
 const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
 
 function pad2(n){ return String(n).padStart(2,"0"); }
@@ -226,20 +225,6 @@ function stripCutoffBlock(lines, log){
   return lines.slice(0, startIdx);
 }
 
-function enforceTools1to8OrThrow(lines){
-  // Before we do anything fancy, scan for any Tnnmm and reject if tool > 08
-  for (let i=0;i<lines.length;i++){
-    const m = lines[i].match(ANY_TOOL_TOK_RE);
-    if (m){
-      const tool = parseInt(m[1], 10);
-      if (tool < 1 || tool > 8){
-        const lineNo = i + 1;
-        throw new Error(`Tool out of range at line ${lineNo}: found T${m[1]}${m[2]}. This machine only supports tools 01–08.`);
-      }
-    }
-  }
-}
-
 function insertManualStopsForceM06NoSpace(lines, log){
   const out = [];
   let firstToolSeen = false;
@@ -284,12 +269,114 @@ function ensureProgramEnd(lines, log){
   return lines;
 }
 
-function convertText(src){
-  const log = [];
-  let lines = src.split(/\r?\n/).map(l => l + "\n");
+/** ---------- Tool swap UI + logic ---------- */
 
-  // enforce tools 01–08 early (hard rule)
-  enforceTools1to8OrThrow(lines);
+function scanToolCalls(lines){
+  // Finds tool calls like: T0101, M06T0101, N123 T0909, etc.
+  const found = [];
+  const re = /\b(?:M06\s*)?T(\d{2})(\d{2})\b/ig;
+
+  for (let i = 0; i < lines.length; i++){
+    const line = lines[i];
+    let m;
+    while ((m = re.exec(line)) !== null){
+      const tool = parseInt(m[1], 10);
+      const off  = parseInt(m[2], 10);
+      found.push({ tool, off, lineNo: i + 1, raw: m[0] });
+    }
+  }
+  return found;
+}
+
+function getOutOfRangeTools(toolCalls){
+  const map = new Map(); // toolNumber -> first occurrence line
+  for (const t of toolCalls){
+    if (t.tool > 8 || t.tool < 1){
+      if (!map.has(t.tool)) map.set(t.tool, t.lineNo);
+    }
+  }
+  return [...map.entries()].map(([tool, lineNo]) => ({ tool, lineNo }));
+}
+
+function renderToolSwapUI(outOfRangeTools){
+  const rows = outOfRangeTools.map(({tool, lineNo}) => {
+    const options = Array.from({length: 8}, (_, i) => {
+      const v = String(i + 1).padStart(2, "0");
+      // Default: if tool is 9, default to tool 7 (common part-off in proprietary file), otherwise tool 1
+      const selected = (tool === 9 && v === "07") || (tool !== 9 && v === "01") ? "selected" : "";
+      return `<option value="${v}" ${selected}>Tool ${v}</option>`;
+    }).join("");
+
+    const tStr = String(tool).padStart(2, "0");
+    return `
+      <div style="display:flex; gap:10px; align-items:center; margin:8px 0; flex-wrap:wrap;">
+        <div style="min-width:320px;">
+          <b>Found Tool ${tStr} (out of range)</b>
+          <span style="color: var(--muted);">— first seen near line ${lineNo}</span>
+        </div>
+        <div>
+          <label style="color: var(--muted); font-size:12px; margin-right:6px;">Swap to:</label>
+          <select data-swap-from="${tStr}"
+            style="padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.18); background:#0f1422; color:var(--text);">
+            ${options}
+          </select>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div style="margin-top:6px;">
+      <div class="pill bad" style="display:inline-block; margin-bottom:10px;">
+        Conversion paused — tool(s) out of range
+      </div>
+      <div style="color: var(--muted); margin-bottom:10px;">
+        Your machine supports only tools <b>01–08</b>. Choose how to swap each out-of-range tool.
+        We will convert <b>Tnnmm → Txxxx</b> so tool and offset match (example: <b>T0909 → T0707</b>).
+      </div>
+      ${rows}
+      <button id="applySwaps" style="margin-top:10px;">Apply swaps & convert</button>
+    </div>
+  `;
+}
+
+function applyToolSwapsToLines(lines, toolSwapMap, log){
+  // toolSwapMap example: { 9: 7 }
+  // Rule: replace tool+offset with swapped tool number (T0909 -> T0707).
+  // Also normalize any M06 tool call to NO SPACE style when we touch it (M06T0707).
+  const out = [];
+  const re = /\b(M06\s*)?T(\d{2})(\d{2})\b/ig;
+
+  for (let i = 0; i < lines.length; i++){
+    const original = lines[i];
+    const updated = original.replace(re, (match, m06Part, toolStr, offStr) => {
+      const tool = parseInt(toolStr, 10);
+      const mapped = toolSwapMap[tool];
+      if (mapped == null) return match;
+
+      const nt = String(mapped).padStart(2, "0");
+      const repl = (m06Part != null) ? `M06T${nt}${nt}` : `T${nt}${nt}`;
+      return repl;
+    });
+
+    if (updated !== original){
+      out.push(updated);
+      log.push(`Applied tool swap(s) on/near line ${i+1}`);
+    } else {
+      out.push(original);
+    }
+  }
+  return out;
+}
+
+function runConversionWithSwaps(toolSwapMap){
+  const log = [];
+  let lines = originalText.split(/\r?\n/).map(l => l + "\n");
+
+  // Apply user swaps first (so subsequent passes see only 01–08 tools)
+  if (toolSwapMap){
+    lines = applyToolSwapsToLines(lines, toolSwapMap, log);
+  }
 
   lines = lines.map(l => normalizeBILLET(l, log));
   lines = lines.map(l => removeG54(l, log));
@@ -413,8 +500,6 @@ function escapeHtml(s){
 
 function renderCode(container, text, highlightFlags=null){
   const lines = text.split(/\r?\n/);
-  // Remove a possible trailing empty line created by split
-  // but keep it if file really ends with blank (not important)
   container.innerHTML = "";
 
   for (let i=0;i<lines.length;i++){
@@ -456,6 +541,9 @@ let originalText = "";
 let convertedText = "";
 let convertedBlob = null;
 
+// When tools are out of range, we pause and show swap UI in the log area
+let pendingOutOfRange = null;
+
 function setStatus(text, kind=""){
   statusEl.textContent = text;
   statusEl.className = "pill" + (kind ? ` ${kind}` : "");
@@ -467,6 +555,8 @@ fileEl.addEventListener("change", async (e) => {
   convertBtn.disabled = true;
   convertedText = "";
   logEl.textContent = "—";
+  pendingOutOfRange = null;
+
   kpiChanged.textContent = "Changed lines: —";
   kpiInserted.textContent = "Inserted lines: —";
   kpiWarnings.textContent = "Warnings: —";
@@ -501,26 +591,80 @@ convertBtn.addEventListener("click", () => {
 
   setStatus("Converting…","ok");
   logEl.textContent = "—";
+  pendingOutOfRange = null;
 
   try{
-    const { out, log } = convertText(originalText);
+    const srcLines = originalText.split(/\r?\n/).map(l => l + "\n");
+    const toolCalls = scanToolCalls(srcLines);
+    const outOfRange = getOutOfRangeTools(toolCalls);
+
+    // Pause and ask for swaps if needed
+    if (outOfRange.length > 0){
+      pendingOutOfRange = outOfRange;
+
+      logEl.innerHTML = renderToolSwapUI(outOfRange);
+      kpiWarnings.textContent = `Warnings: 1`;
+      kpiChanged.textContent = `Changed lines: —`;
+      kpiInserted.textContent = `Inserted lines: —`;
+      setStatus("Conversion paused — choose swaps","bad");
+
+      const btn = document.getElementById("applySwaps");
+      btn.addEventListener("click", () => {
+        const selects = logEl.querySelectorAll("select[data-swap-from]");
+        const swapMap = {};
+        selects.forEach(sel => {
+          const from = parseInt(sel.getAttribute("data-swap-from"), 10);
+          const to = parseInt(sel.value, 10);
+          swapMap[from] = to;
+        });
+
+        // Run conversion with user-defined swaps
+        try {
+          const { out, log } = runConversionWithSwaps(swapMap);
+          convertedText = out;
+
+          const { flags, inserted, replaced } = computeHighlightFlags(originalText, convertedText);
+          renderCode(newView, convertedText, flags);
+
+          const changed = inserted + replaced;
+          kpiChanged.textContent = `Changed lines: ${changed}`;
+          kpiInserted.textContent = `Inserted lines: ${inserted}`;
+          kpiWarnings.textContent = `Warnings: 0`;
+
+          logEl.textContent = log.length ? log.map(x => `• ${x}`).join("\n") : "No changes detected.";
+          convertedBlob = new Blob([convertedText], { type: "text/plain" });
+          downloadBtn.disabled = false;
+          setStatus("Converted ✓","ok");
+        } catch (err2){
+          convertedBlob = null;
+          downloadBtn.disabled = true;
+          renderCode(newView, "");
+          logEl.textContent = String(err2?.message || err2);
+          kpiWarnings.textContent = `Warnings: 1`;
+          setStatus("Conversion blocked","bad");
+        }
+      });
+
+      return;
+    }
+
+    // No out-of-range tools: run normal conversion
+    const { out, log } = runConversionWithSwaps(null);
     convertedText = out;
 
     const { flags, inserted, replaced } = computeHighlightFlags(originalText, convertedText);
-
     renderCode(newView, convertedText, flags);
 
-    // KPIs
     const changed = inserted + replaced;
     kpiChanged.textContent = `Changed lines: ${changed}`;
     kpiInserted.textContent = `Inserted lines: ${inserted}`;
     kpiWarnings.textContent = `Warnings: 0`;
 
-    // log
     logEl.textContent = log.length ? log.map(x => `• ${x}`).join("\n") : "No changes detected.";
     convertedBlob = new Blob([convertedText], { type: "text/plain" });
     downloadBtn.disabled = false;
     setStatus("Converted ✓","ok");
+
   } catch (err){
     convertedBlob = null;
     downloadBtn.disabled = true;
@@ -550,6 +694,7 @@ clearBtn.addEventListener("click", () => {
   originalText = "";
   convertedText = "";
   convertedBlob = null;
+  pendingOutOfRange = null;
   convertBtn.disabled = true;
   downloadBtn.disabled = true;
   outnameEl.value = "";
