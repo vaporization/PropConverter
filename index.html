@@ -3,297 +3,564 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>SolidWorks G-code → “New and Working” Converter</title>
+  <title>SolidWorks G-code → “New and Working” (Diff Highlight)</title>
   <style>
-    :root { --bg:#0b0e14; --card:#121826; --text:#e6e9ef; --muted:#a9b1c3; --accent:#7aa2f7; --ok:#9ece6a; --warn:#f7768e; }
-    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); }
-    .wrap { max-width:980px; margin:0 auto; padding:24px; }
-    h1 { margin:0 0 8px; font-size:22px; }
-    p { margin:0 0 14px; color:var(--muted); line-height:1.4; }
-    .card { background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:16px; margin:14px 0; }
-    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-    .row > * { flex: 1 1 auto; }
-    button { cursor:pointer; border:0; border-radius:12px; padding:10px 12px; font-weight:650; background:var(--accent); color:#0b0e14; }
-    button:disabled { opacity:.45; cursor:not-allowed; }
-    .ghost { background:transparent; color:var(--text); border:1px solid rgba(255,255,255,.18); }
-    .pill { display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.18); color:var(--muted); font-size:12px; }
-    textarea { width:100%; min-height:220px; background:#0f1422; border:1px solid rgba(255,255,255,.12); border-radius:12px; color:var(--text); padding:12px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; }
-    .log { white-space:pre-wrap; color:var(--muted); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; }
-    .ok { color:var(--ok); }
-    .warn { color:var(--warn); }
-    input[type="file"] { width:100%; }
-    .small { font-size:12px; color:var(--muted); }
+    :root{
+      --bg:#0b0e14; --card:#121826; --text:#e6e9ef; --muted:#a9b1c3;
+      --accent:#7aa2f7; --ok:#9ece6a; --bad:#f7768e;
+      --codebg:#0f1422; --border:rgba(255,255,255,.12);
+      --hl: rgba(250, 211, 100, .25); /* highlight background */
+      --hl2: rgba(247, 118, 142, .18); /* "replaced" stronger tint */
+    }
+    body{ margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); }
+    .wrap{ max-width:1200px; margin:0 auto; padding:22px; }
+    h1{ margin:0 0 8px; font-size:22px; }
+    p{ margin:0 0 14px; color:var(--muted); line-height:1.45; }
+    .card{ background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:16px; margin:14px 0; }
+    .row{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    button{ cursor:pointer; border:0; border-radius:12px; padding:10px 12px; font-weight:700; background:var(--accent); color:#0b0e14; }
+    button:disabled{ opacity:.45; cursor:not-allowed; }
+    .ghost{ background:transparent; color:var(--text); border:1px solid rgba(255,255,255,.18); }
+    .pill{ display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.18); color:var(--muted); font-size:12px; }
+    .pill.ok{ color:var(--ok); border-color:rgba(158,206,106,.35); }
+    .pill.bad{ color:var(--bad); border-color:rgba(247,118,142,.35); }
+
+    input[type="file"]{ width:100%; }
+    .small{ font-size:12px; color:var(--muted); }
+    .split{ display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+    @media (max-width: 980px){ .split{ grid-template-columns:1fr; } }
+
+    .panelTitle{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+    .panelTitle strong{ font-size:13px; }
+    .codeWrap{
+      background:var(--codebg);
+      border:1px solid var(--border);
+      border-radius:12px;
+      overflow:auto;
+      max-height: 520px;
+    }
+    .code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      padding:10px 0;
+      min-width: 520px;
+    }
+    .line{
+      display:flex;
+      white-space:pre;
+    }
+    .ln{
+      width:56px;
+      text-align:right;
+      padding:0 10px 0 0;
+      user-select:none;
+      color:rgba(169,177,195,.55);
+      border-right:1px solid rgba(255,255,255,.06);
+      margin-right:10px;
+      flex:0 0 auto;
+    }
+    .txt{ padding-right:12px; }
+    .hl{ background:var(--hl); }
+    .hl2{ background:var(--hl2); }
+    .log{
+      white-space:pre-wrap;
+      color:var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size:12px;
+    }
+    .kpi{
+      display:flex; gap:10px; flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .kpi span{
+      font-size:12px; color:var(--muted);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:999px; padding:6px 10px;
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>SolidWorks G-code → “New and Working”</h1>
-    <p>
-      Upload a SolidWorks-exported lathe G-code file and download a converted version that matches your controller expectations:
-      <span class="pill">forces M06 tool changes</span>
-      <span class="pill">manual stops (M00)</span>
-      <span class="pill">removes G54</span>
-      <span class="pill">replaces X508/Z127 retract</span>
-      <span class="pill">removes cutoff block</span>
+<div class="wrap">
+  <h1>SolidWorks G-code → “New and Working” (shows exact changes)</h1>
+  <p>
+    Upload a SolidWorks-exported lathe program, convert it, and download the result.
+    The <b>right pane highlights</b> every line that changed or was inserted.
+    Tool changes are forced to <b>M06T0707 style (no spaces)</b>. Only tools <b>01–08</b> are allowed.
+  </p>
+
+  <div class="card">
+    <div class="row">
+      <div style="flex: 1 1 480px;">
+        <label class="small">Input file (.nc, .tap, .txt, .gcode)</label>
+        <input id="file" type="file" accept=".nc,.tap,.txt,.gcode" />
+      </div>
+      <div style="flex:0 0 320px;">
+        <label class="small">Output name</label>
+        <input id="outname" type="text" style="width:100%; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0f1422; color:var(--text);" placeholder="new_and_working.nc"/>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <button id="convert" disabled>Convert</button>
+      <button id="download" class="ghost" disabled>Download Converted</button>
+      <button id="clear" class="ghost">Clear</button>
+      <span id="status" class="pill">Waiting for file…</span>
+    </div>
+
+    <div class="kpi">
+      <span id="kpiChanged">Changed lines: —</span>
+      <span id="kpiInserted">Inserted lines: —</span>
+      <span id="kpiWarnings">Warnings: —</span>
+    </div>
+
+    <p class="small" style="margin-top:10px;">
+      Runs locally in your browser. GitHub Pages cannot read/write your disk directly, so you upload + download.
     </p>
+  </div>
 
-    <div class="card">
-      <div class="row">
-        <div>
-          <label class="small">Input file (.nc, .tap, .txt, .gcode)</label>
-          <input id="file" type="file" accept=".nc,.tap,.txt,.gcode" />
+  <div class="card">
+    <div class="split">
+      <div>
+        <div class="panelTitle">
+          <strong>Original (SolidWorks)</strong>
+          <span class="pill">No highlights</span>
         </div>
-        <div style="flex:0 0 auto; min-width:220px;">
-          <label class="small">Output name</label>
-          <input id="outname" type="text" style="width:100%; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0f1422; color:var(--text);" placeholder="new_and_working.nc"/>
-        </div>
+        <div class="codeWrap"><div id="origView" class="code"></div></div>
       </div>
 
-      <div class="row" style="margin-top:12px;">
-        <button id="convert" disabled>Convert</button>
-        <button id="download" class="ghost" disabled>Download Converted</button>
-        <button id="clear" class="ghost">Clear</button>
-      </div>
-
-      <p class="small" style="margin-top:10px;">
-        Note: This runs entirely in your browser (no uploads to a server). GitHub Pages can’t access your disk directly, so you upload + download.
-      </p>
-    </div>
-
-    <div class="card">
-      <div class="row" style="align-items:flex-start;">
-        <div>
-          <label class="small">Input preview</label>
-          <textarea id="input" placeholder="Input file will appear here…" readonly></textarea>
+      <div>
+        <div class="panelTitle">
+          <strong>Converted (“new and working”)</strong>
+          <span class="pill ok">Highlights on</span>
         </div>
-        <div>
-          <label class="small">Converted output</label>
-          <textarea id="output" placeholder="Converted output will appear here…" readonly></textarea>
-        </div>
+        <div class="codeWrap"><div id="newView" class="code"></div></div>
       </div>
-    </div>
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between;">
-        <div><strong>Conversion log</strong></div>
-        <div id="status" class="pill">Waiting for file…</div>
-      </div>
-      <div id="log" class="log" style="margin-top:10px;">—</div>
     </div>
   </div>
 
+  <div class="card">
+    <div class="panelTitle">
+      <strong>Conversion log</strong>
+      <span class="pill">What changed & why</span>
+    </div>
+    <div id="log" class="log">—</div>
+  </div>
+</div>
+
 <script>
-  // --------------------------
-  // Converter logic (JS)
-  // Mirrors your "new and working" rules.
-  // --------------------------
+/**
+ * ========= Conversion rules =========
+ * - Convert "[BILLET ..." -> "(BILLET ...)"
+ * - Remove G54 tokens
+ * - Replace any line containing X508 and Z127 with:
+ *     M09
+ *     G28 U0 W0
+ * - Remove cutoff/part-off block (since you part off by hand)
+ * - Enforce tool calls ONLY 01–08
+ * - For every tool line, inject:
+ *     M05
+ *     M00 (...)  (manual stop)
+ *     M06Tnnmm   (NO SPACE, matches proprietary style)
+ * - Normalize program ending:
+ *     M05
+ *     M00 (PROGRAM END - PART OFF BY HAND)
+ *     M30
+ */
 
-  const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
-  const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
+const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
+const ANY_TOOL_TOK_RE = /\bT(\d{2})(\d{2})\b/i;
+const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
 
-  function normalizeBILLET(line, log) {
-    if (HAS_BILLET_RE.test(line)) {
-      const content = line.trim().slice(1).trim(); // drop '['
-      log.push("Converted [BILLET ... to (BILLET ...)");
-      return `(${content})\n`;
+function pad2(n){ return String(n).padStart(2,"0"); }
+
+function normalizeBILLET(line, log){
+  if (HAS_BILLET_RE.test(line)) {
+    const content = line.trim().slice(1).trim(); // drop '['
+    log.push("Converted [BILLET … to (BILLET …) (safer comment syntax)");
+    return `(${content})\n`;
+  }
+  return line;
+}
+
+function removeG54(line, log){
+  if (/\bG54\b/i.test(line)) log.push("Removed G54 (controller was faulting on work offset)");
+  return line.replace(/\bG54\b\s*/ig, "");
+}
+
+function replaceFarRetract(lines, log){
+  const out = [];
+  for (const line of lines) {
+    const hasX508 = /\bX\s*508(\.0*)?\b/i.test(line);
+    const hasZ127 = /\bZ\s*127(\.0*)?\b/i.test(line);
+    if (hasX508 && hasZ127) {
+      log.push("Replaced X508/Z127 retract (overtravel) with M09 + G28 U0 W0");
+      out.push("M09\n");
+      out.push("G28 U0 W0\n");
+    } else {
+      out.push(line.endsWith("\n") ? line : line + "\n");
     }
-    return line;
+  }
+  return out;
+}
+
+function stripCutoffBlock(lines, log){
+  let startIdx = null;
+
+  for (let i=0;i<lines.length;i++){
+    const u = lines[i].toUpperCase();
+    if (u.includes("(3MM CUT-OFF") || u.includes("( CUT OFF") || u.includes("(PART OFF")) {
+      startIdx = i; break;
+    }
   }
 
-  function removeG54(line, log) {
-    if (/\bG54\b/i.test(line)) log.push("Removed G54 from a motion line");
-    return line.replace(/\bG54\b\s*/ig, "");
+  // fallback: late T0707/T0909-ish tool call (rare)
+  if (startIdx === null) {
+    for (let i=lines.length-1;i>=0;i--){
+      if (/^\s*(?:M06\s*)?T(07|09)(07|09)\s*$/i.test(lines[i])) { startIdx = i; break; }
+    }
   }
 
-  function replaceFarRetract(lines, log) {
-    const out = [];
-    for (const line of lines) {
-      const hasX508 = /\bX\s*508(\.0*)?\b/i.test(line);
-      const hasZ127 = /\bZ\s*127(\.0*)?\b/i.test(line);
-      if (hasX508 && hasZ127) {
-        log.push("Replaced X508/Z127 retract with M09 + G28 U0 W0 (limits-safe)");
-        out.push("M09\n");
-        out.push("G28 U0 W0\n");
+  if (startIdx === null) return lines;
+  log.push("Removed cutoff/part-off block (you’re parting off by hand)");
+  return lines.slice(0, startIdx);
+}
+
+function enforceTools1to8OrThrow(lines){
+  // Before we do anything fancy, scan for any Tnnmm and reject if tool > 08
+  for (let i=0;i<lines.length;i++){
+    const m = lines[i].match(ANY_TOOL_TOK_RE);
+    if (m){
+      const tool = parseInt(m[1], 10);
+      if (tool < 1 || tool > 8){
+        const lineNo = i + 1;
+        throw new Error(`Tool out of range at line ${lineNo}: found T${m[1]}${m[2]}. This machine only supports tools 01–08.`);
+      }
+    }
+  }
+}
+
+function insertManualStopsForceM06NoSpace(lines, log){
+  const out = [];
+  let firstToolSeen = false;
+
+  for (const raw of lines){
+    const line = raw.endsWith("\n") ? raw : raw + "\n";
+    const m = raw.match(TOOL_LINE_RE);
+
+    if (m){
+      const tool = parseInt(m[1], 10);
+      const off  = parseInt(m[2], 10);
+
+      out.push("M05\n");
+      if (!firstToolSeen){
+        out.push(`M00 (LOAD TOOL ${tool} - T${pad2(tool)}${pad2(off)}, THEN CYCLE START)\n`);
+        firstToolSeen = true;
+        log.push(`Inserted mandatory stop for initial tool load (Tool ${tool})`);
       } else {
-        out.push(line.endsWith("\n") ? line : line + "\n");
-      }
-    }
-    return out;
-  }
-
-  function stripCutoffBlock(lines, log) {
-    let startIdx = null;
-
-    for (let i = 0; i < lines.length; i++) {
-      const u = lines[i].toUpperCase();
-      if (u.includes("(3MM CUT-OFF") || u.includes("( CUT OFF") || u.includes("(PART OFF")) {
-        startIdx = i;
-        break;
-      }
-    }
-
-    if (startIdx === null) {
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (/^\s*(?:M06\s*)?T(07|09)(07|09)\s*$/i.test(lines[i])) {
-          startIdx = i;
-          break;
-        }
-      }
-    }
-
-    if (startIdx === null) return lines;
-
-    log.push("Removed cutoff/part-off block (you’re parting off by hand)");
-    return lines.slice(0, startIdx);
-  }
-
-  function insertManualStopsForceM06(lines, log) {
-    const out = [];
-    let firstToolSeen = false;
-
-    for (const lineRaw of lines) {
-      const line = lineRaw.endsWith("\n") ? lineRaw : lineRaw + "\n";
-      const m = lineRaw.match(TOOL_LINE_RE);
-
-      if (m) {
-        const tool = parseInt(m[1], 10);
-        const off = parseInt(m[2], 10);
-
-        out.push("M05\n");
-        if (!firstToolSeen) {
-          out.push(`M00 (LOAD TOOL ${tool} - T${String(tool).padStart(2,"0")}${String(off).padStart(2,"0")}, THEN CYCLE START)\n`);
-          log.push(`Inserted initial manual load stop for tool ${tool} (forced M06)`);
-          firstToolSeen = true;
-        } else {
-          out.push(`M00 (MANUAL TOOL CHANGE: LOAD TOOL ${tool} - T${String(tool).padStart(2,"0")}${String(off).padStart(2,"0")}, THEN CYCLE START)\n`);
-          log.push(`Inserted manual tool-change stop for tool ${tool} (forced M06)`);
-        }
-
-        out.push(`M06 T${String(tool).padStart(2,"0")}${String(off).padStart(2,"0")}\n`);
-        continue;
+        out.push(`M00 (MANUAL TOOL CHANGE: LOAD TOOL ${tool} - T${pad2(tool)}${pad2(off)}, THEN CYCLE START)\n`);
+        log.push(`Inserted mandatory manual tool-change stop (Tool ${tool})`);
       }
 
-      out.push(line);
-    }
-    return out;
-  }
-
-  function ensureProgramEnd(lines, log) {
-    // trim trailing blanks
-    while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-
-    // remove trailing M30 if present
-    if (lines.length && lines[lines.length - 1].trim().toUpperCase() === "M30") lines.pop();
-
-    lines.push("M05\n");
-    lines.push("M00 (PROGRAM END - PART OFF BY HAND)\n");
-    lines.push("M30\n");
-    log.push("Normalized program ending (M05, M00 end note, M30)");
-    return lines;
-  }
-
-  function convertText(src) {
-    const log = [];
-    let lines = src.split(/\r?\n/).map(l => l + "\n");
-    lines = lines.map(l => normalizeBILLET(l, log));
-    lines = lines.map(l => removeG54(l, log));
-    lines = replaceFarRetract(lines, log);
-    lines = stripCutoffBlock(lines, log);
-    lines = insertManualStopsForceM06(lines, log);
-    lines = ensureProgramEnd(lines, log);
-    return { out: lines.join(""), log };
-  }
-
-  // --------------------------
-  // UI wiring
-  // --------------------------
-
-  const fileEl = document.getElementById("file");
-  const convertBtn = document.getElementById("convert");
-  const downloadBtn = document.getElementById("download");
-  const clearBtn = document.getElementById("clear");
-  const inputTa = document.getElementById("input");
-  const outputTa = document.getElementById("output");
-  const logEl = document.getElementById("log");
-  const statusEl = document.getElementById("status");
-  const outnameEl = document.getElementById("outname");
-
-  let convertedBlob = null;
-
-  function setStatus(text, ok=true) {
-    statusEl.textContent = text;
-    statusEl.className = "pill " + (ok ? "ok" : "warn");
-  }
-
-  fileEl.addEventListener("change", async (e) => {
-    convertedBlob = null;
-    downloadBtn.disabled = true;
-    outputTa.value = "";
-    logEl.textContent = "—";
-    setStatus("Loading file…", true);
-
-    const f = e.target.files?.[0];
-    if (!f) {
-      inputTa.value = "";
-      convertBtn.disabled = true;
-      setStatus("Waiting for file…", true);
-      return;
+      // IMPORTANT: proprietary style, NO SPACE:
+      out.push(`M06T${pad2(tool)}${pad2(off)}\n`);
+      continue;
     }
 
-    const text = await f.text();
-    inputTa.value = text.slice(0, 200000); // keep UI responsive
-    convertBtn.disabled = false;
+    out.push(line);
+  }
 
-    // suggest output name
-    const base = f.name.replace(/\.[^/.]+$/, "");
-    const ext = (f.name.match(/\.[^/.]+$/) || [".nc"])[0];
-    outnameEl.value = `${base}_new_and_working${ext}`;
+  return out;
+}
 
-    setStatus("Ready to convert", true);
-  });
+function ensureProgramEnd(lines, log){
+  while (lines.length && lines[lines.length-1].trim()==="") lines.pop();
+  if (lines.length && lines[lines.length-1].trim().toUpperCase()==="M30") lines.pop();
 
-  convertBtn.addEventListener("click", () => {
-    const src = inputTa.value;
-    if (!src.trim()) return;
+  lines.push("M05\n");
+  lines.push("M00 (PROGRAM END - PART OFF BY HAND)\n");
+  lines.push("M30\n");
+  log.push("Normalized ending: M05, M00 (end note), M30");
+  return lines;
+}
 
-    setStatus("Converting…", true);
+function convertText(src){
+  const log = [];
+  let lines = src.split(/\r?\n/).map(l => l + "\n");
 
-    const { out, log } = convertText(src);
-    outputTa.value = out.slice(0, 200000);
+  // enforce tools 01–08 early (hard rule)
+  enforceTools1to8OrThrow(lines);
 
-    convertedBlob = new Blob([out], { type: "text/plain" });
-    downloadBtn.disabled = false;
+  lines = lines.map(l => normalizeBILLET(l, log));
+  lines = lines.map(l => removeG54(l, log));
+  lines = replaceFarRetract(lines, log);
+  lines = stripCutoffBlock(lines, log);
+  lines = insertManualStopsForceM06NoSpace(lines, log);
+  lines = ensureProgramEnd(lines, log);
 
+  return { out: lines.join(""), log };
+}
+
+/**
+ * ========= Diff highlighting (right side only) =========
+ * We compute a line-based diff (Myers) and highlight:
+ *  - inserted lines (new content)
+ *  - replaced lines (delete+insert sequences)
+ */
+function myersDiff(aLines, bLines){
+  const N = aLines.length, M = bLines.length;
+  const max = N + M;
+  const v = new Map();
+  v.set(1, 0);
+  const trace = [];
+
+  for (let d=0; d<=max; d++){
+    const vSnapshot = new Map(v);
+    trace.push(vSnapshot);
+
+    for (let k=-d; k<=d; k+=2){
+      let x;
+      if (k === -d || (k !== d && (v.get(k-1) ?? -1) < (v.get(k+1) ?? -1))){
+        x = v.get(k+1) ?? 0;        // down
+      } else {
+        x = (v.get(k-1) ?? 0) + 1;  // right
+      }
+      let y = x - k;
+
+      while (x < N && y < M && aLines[x] === bLines[y]) { x++; y++; }
+
+      v.set(k, x);
+
+      if (x >= N && y >= M) {
+        return backtrack(trace, aLines, bLines);
+      }
+    }
+  }
+  return []; // shouldn't happen
+}
+
+function backtrack(trace, aLines, bLines){
+  let x = aLines.length;
+  let y = bLines.length;
+  const edits = [];
+
+  for (let d=trace.length-1; d>=0; d--){
+    const v = trace[d];
+    const k = x - y;
+
+    let prevK;
+    if (k === -d || (k !== d && (v.get(k-1) ?? -1) < (v.get(k+1) ?? -1))){
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+
+    const prevX = v.get(prevK) ?? 0;
+    const prevY = prevX - prevK;
+
+    while (x > prevX && y > prevY){
+      edits.push({type:"equal", aIndex:x-1, bIndex:y-1});
+      x--; y--;
+    }
+
+    if (d === 0) break;
+
+    if (x === prevX){
+      // insertion in B
+      edits.push({type:"insert", bIndex:y-1});
+      y--;
+    } else {
+      // deletion from A
+      edits.push({type:"delete", aIndex:x-1});
+      x--;
+    }
+  }
+
+  edits.reverse();
+  return edits;
+}
+
+function computeHighlightFlags(origText, newText){
+  const a = origText.split(/\r?\n/);
+  const b = newText.split(/\r?\n/);
+
+  const edits = myersDiff(a, b);
+
+  const hl = new Array(b.length).fill(null); // null / "insert" / "replace"
+  // Mark inserts
+  for (let i=0;i<edits.length;i++){
+    if (edits[i].type === "insert" && edits[i].bIndex != null){
+      hl[edits[i].bIndex] = "insert";
+    }
+  }
+  // Mark replace: a delete immediately followed by an insert (common pattern)
+  for (let i=0;i<edits.length-1;i++){
+    if (edits[i].type === "delete" && edits[i+1].type === "insert"){
+      const bi = edits[i+1].bIndex;
+      if (bi != null) hl[bi] = "replace";
+    }
+  }
+
+  let inserted = hl.filter(x => x === "insert").length;
+  let replaced = hl.filter(x => x === "replace").length;
+
+  return { flags: hl, inserted, replaced };
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderCode(container, text, highlightFlags=null){
+  const lines = text.split(/\r?\n/);
+  // Remove a possible trailing empty line created by split
+  // but keep it if file really ends with blank (not important)
+  container.innerHTML = "";
+
+  for (let i=0;i<lines.length;i++){
+    const lineDiv = document.createElement("div");
+    lineDiv.className = "line";
+
+    const ln = document.createElement("span");
+    ln.className = "ln";
+    ln.textContent = String(i+1);
+
+    const txt = document.createElement("span");
+    let cls = "txt";
+    if (highlightFlags && highlightFlags[i]) {
+      cls += (highlightFlags[i] === "replace") ? " hl2" : " hl";
+    }
+    txt.className = cls;
+    txt.innerHTML = escapeHtml(lines[i] ?? "");
+    lineDiv.appendChild(ln);
+    lineDiv.appendChild(txt);
+    container.appendChild(lineDiv);
+  }
+}
+
+// ---------------- UI wiring ----------------
+const fileEl = document.getElementById("file");
+const convertBtn = document.getElementById("convert");
+const downloadBtn = document.getElementById("download");
+const clearBtn = document.getElementById("clear");
+const statusEl = document.getElementById("status");
+const outnameEl = document.getElementById("outname");
+const origView = document.getElementById("origView");
+const newView  = document.getElementById("newView");
+const logEl    = document.getElementById("log");
+const kpiChanged = document.getElementById("kpiChanged");
+const kpiInserted = document.getElementById("kpiInserted");
+const kpiWarnings = document.getElementById("kpiWarnings");
+
+let originalText = "";
+let convertedText = "";
+let convertedBlob = null;
+
+function setStatus(text, kind=""){
+  statusEl.textContent = text;
+  statusEl.className = "pill" + (kind ? ` ${kind}` : "");
+}
+
+fileEl.addEventListener("change", async (e) => {
+  convertedBlob = null;
+  downloadBtn.disabled = true;
+  convertBtn.disabled = true;
+  convertedText = "";
+  logEl.textContent = "—";
+  kpiChanged.textContent = "Changed lines: —";
+  kpiInserted.textContent = "Inserted lines: —";
+  kpiWarnings.textContent = "Warnings: —";
+
+  const f = e.target.files?.[0];
+  if (!f){
+    originalText = "";
+    renderCode(origView, "");
+    renderCode(newView, "");
+    setStatus("Waiting for file…");
+    return;
+  }
+
+  setStatus("Loading file…","ok");
+  originalText = await f.text();
+
+  // render original immediately
+  renderCode(origView, originalText);
+  renderCode(newView, "");
+
+  // suggest output name
+  const base = f.name.replace(/\.[^/.]+$/, "");
+  const ext = (f.name.match(/\.[^/.]+$/) || [".nc"])[0];
+  outnameEl.value = `${base}_new_and_working${ext}`;
+
+  convertBtn.disabled = false;
+  setStatus("Ready to convert","ok");
+});
+
+convertBtn.addEventListener("click", () => {
+  if (!originalText.trim()) return;
+
+  setStatus("Converting…","ok");
+  logEl.textContent = "—";
+
+  try{
+    const { out, log } = convertText(originalText);
+    convertedText = out;
+
+    const { flags, inserted, replaced } = computeHighlightFlags(originalText, convertedText);
+
+    renderCode(newView, convertedText, flags);
+
+    // KPIs
+    const changed = inserted + replaced;
+    kpiChanged.textContent = `Changed lines: ${changed}`;
+    kpiInserted.textContent = `Inserted lines: ${inserted}`;
+    kpiWarnings.textContent = `Warnings: 0`;
+
+    // log
     logEl.textContent = log.length ? log.map(x => `• ${x}`).join("\n") : "No changes detected.";
-
-    setStatus("Converted ✓", true);
-  });
-
-  downloadBtn.addEventListener("click", () => {
-    if (!convertedBlob) return;
-    const name = (outnameEl.value || "new_and_working.nc").trim();
-
-    const url = URL.createObjectURL(convertedBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  });
-
-  clearBtn.addEventListener("click", () => {
-    fileEl.value = "";
-    inputTa.value = "";
-    outputTa.value = "";
-    logEl.textContent = "—";
-    outnameEl.value = "";
+    convertedBlob = new Blob([convertedText], { type: "text/plain" });
+    downloadBtn.disabled = false;
+    setStatus("Converted ✓","ok");
+  } catch (err){
     convertedBlob = null;
-    convertBtn.disabled = true;
     downloadBtn.disabled = true;
-    setStatus("Waiting for file…", true);
-  });
+    renderCode(newView, "");
+    logEl.textContent = String(err?.message || err);
+    kpiWarnings.textContent = `Warnings: 1`;
+    setStatus("Conversion blocked","bad");
+  }
+});
+
+downloadBtn.addEventListener("click", () => {
+  if (!convertedBlob) return;
+  const name = (outnameEl.value || "new_and_working.nc").trim();
+
+  const url = URL.createObjectURL(convertedBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+clearBtn.addEventListener("click", () => {
+  fileEl.value = "";
+  originalText = "";
+  convertedText = "";
+  convertedBlob = null;
+  convertBtn.disabled = true;
+  downloadBtn.disabled = true;
+  outnameEl.value = "";
+  renderCode(origView, "");
+  renderCode(newView, "");
+  logEl.textContent = "—";
+  kpiChanged.textContent = "Changed lines: —";
+  kpiInserted.textContent = "Inserted lines: —";
+  kpiWarnings.textContent = "Warnings: —";
+  setStatus("Waiting for file…");
+});
 </script>
 </body>
 </html>
