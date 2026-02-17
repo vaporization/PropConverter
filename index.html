@@ -151,6 +151,7 @@
 <script>
 /**
  * ========= Conversion rules =========
+ * - Remove N line numbers (N1, N2, N70, etc.) from the converted file
  * - Convert "[BILLET ..." -> "(BILLET ...)"
  * - Remove G54 tokens
  * - Replace any line containing X508 and Z127 with:
@@ -172,6 +173,15 @@ const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
 const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
 
 function pad2(n){ return String(n).padStart(2,"0"); }
+
+function stripNLineNumber(line, log){
+  // Remove leading N-codes like: "N1 ..." "N70..." "N0030 ..."
+  // Only at start of line (ignoring whitespace), and only if followed by whitespace or end.
+  const before = line;
+  const after = line.replace(/^\s*N\d+\s*/i, "");
+  if (after !== before) log.push("Removed N line number (N###) from start of line");
+  return after;
+}
 
 function normalizeBILLET(line, log){
   if (HAS_BILLET_RE.test(line)) {
@@ -272,7 +282,6 @@ function ensureProgramEnd(lines, log){
 /** ---------- Tool swap UI + logic ---------- */
 
 function scanToolCalls(lines){
-  // Finds tool calls like: T0101, M06T0101, N123 T0909, etc.
   const found = [];
   const re = /\b(?:M06\s*)?T(\d{2})(\d{2})\b/ig;
 
@@ -289,7 +298,7 @@ function scanToolCalls(lines){
 }
 
 function getOutOfRangeTools(toolCalls){
-  const map = new Map(); // toolNumber -> first occurrence line
+  const map = new Map();
   for (const t of toolCalls){
     if (t.tool > 8 || t.tool < 1){
       if (!map.has(t.tool)) map.set(t.tool, t.lineNo);
@@ -302,7 +311,6 @@ function renderToolSwapUI(outOfRangeTools){
   const rows = outOfRangeTools.map(({tool, lineNo}) => {
     const options = Array.from({length: 8}, (_, i) => {
       const v = String(i + 1).padStart(2, "0");
-      // Default: if tool is 9, default to tool 7 (common part-off in proprietary file), otherwise tool 1
       const selected = (tool === 9 && v === "07") || (tool !== 9 && v === "01") ? "selected" : "";
       return `<option value="${v}" ${selected}>Tool ${v}</option>`;
     }).join("");
@@ -341,9 +349,6 @@ function renderToolSwapUI(outOfRangeTools){
 }
 
 function applyToolSwapsToLines(lines, toolSwapMap, log){
-  // toolSwapMap example: { 9: 7 }
-  // Rule: replace tool+offset with swapped tool number (T0909 -> T0707).
-  // Also normalize any M06 tool call to NO SPACE style when we touch it (M06T0707).
   const out = [];
   const re = /\b(M06\s*)?T(\d{2})(\d{2})\b/ig;
 
@@ -373,10 +378,13 @@ function runConversionWithSwaps(toolSwapMap){
   const log = [];
   let lines = originalText.split(/\r?\n/).map(l => l + "\n");
 
-  // Apply user swaps first (so subsequent passes see only 01–08 tools)
+  // Apply user swaps first
   if (toolSwapMap){
     lines = applyToolSwapsToLines(lines, toolSwapMap, log);
   }
+
+  // Remove N line numbers early so everything downstream sees clean lines
+  lines = lines.map(l => stripNLineNumber(l, log));
 
   lines = lines.map(l => normalizeBILLET(l, log));
   lines = lines.map(l => removeG54(l, log));
@@ -385,14 +393,23 @@ function runConversionWithSwaps(toolSwapMap){
   lines = insertManualStopsForceM06NoSpace(lines, log);
   lines = ensureProgramEnd(lines, log);
 
-  return { out: lines.join(""), log };
+  // Deduplicate spammy "Removed N line number..." messages
+  const deduped = [];
+  let nRemovedCount = 0;
+  for (const entry of log){
+    if (entry === "Removed N line number (N###) from start of line"){
+      nRemovedCount++;
+    } else {
+      deduped.push(entry);
+    }
+  }
+  if (nRemovedCount > 0) deduped.unshift(`Removed N line numbers (N###) from ${nRemovedCount} line(s)`);
+
+  return { out: lines.join(""), log: deduped };
 }
 
 /**
  * ========= Diff highlighting (right side only) =========
- * We compute a line-based diff (Myers) and highlight:
- *  - inserted lines (new content)
- *  - replaced lines (delete+insert sequences)
  */
 function myersDiff(aLines, bLines){
   const N = aLines.length, M = bLines.length;
@@ -408,9 +425,9 @@ function myersDiff(aLines, bLines){
     for (let k=-d; k<=d; k+=2){
       let x;
       if (k === -d || (k !== d && (v.get(k-1) ?? -1) < (v.get(k+1) ?? -1))){
-        x = v.get(k+1) ?? 0;        // down
+        x = v.get(k+1) ?? 0;
       } else {
-        x = (v.get(k-1) ?? 0) + 1;  // right
+        x = (v.get(k-1) ?? 0) + 1;
       }
       let y = x - k;
 
@@ -423,7 +440,7 @@ function myersDiff(aLines, bLines){
       }
     }
   }
-  return []; // shouldn't happen
+  return [];
 }
 
 function backtrack(trace, aLines, bLines){
@@ -453,11 +470,9 @@ function backtrack(trace, aLines, bLines){
     if (d === 0) break;
 
     if (x === prevX){
-      // insertion in B
       edits.push({type:"insert", bIndex:y-1});
       y--;
     } else {
-      // deletion from A
       edits.push({type:"delete", aIndex:x-1});
       x--;
     }
@@ -473,14 +488,12 @@ function computeHighlightFlags(origText, newText){
 
   const edits = myersDiff(a, b);
 
-  const hl = new Array(b.length).fill(null); // null / "insert" / "replace"
-  // Mark inserts
+  const hl = new Array(b.length).fill(null);
   for (let i=0;i<edits.length;i++){
     if (edits[i].type === "insert" && edits[i].bIndex != null){
       hl[edits[i].bIndex] = "insert";
     }
   }
-  // Mark replace: a delete immediately followed by an insert (common pattern)
   for (let i=0;i<edits.length-1;i++){
     if (edits[i].type === "delete" && edits[i+1].type === "insert"){
       const bi = edits[i+1].bIndex;
@@ -541,9 +554,6 @@ let originalText = "";
 let convertedText = "";
 let convertedBlob = null;
 
-// When tools are out of range, we pause and show swap UI in the log area
-let pendingOutOfRange = null;
-
 function setStatus(text, kind=""){
   statusEl.textContent = text;
   statusEl.className = "pill" + (kind ? ` ${kind}` : "");
@@ -555,7 +565,6 @@ fileEl.addEventListener("change", async (e) => {
   convertBtn.disabled = true;
   convertedText = "";
   logEl.textContent = "—";
-  pendingOutOfRange = null;
 
   kpiChanged.textContent = "Changed lines: —";
   kpiInserted.textContent = "Inserted lines: —";
@@ -573,11 +582,9 @@ fileEl.addEventListener("change", async (e) => {
   setStatus("Loading file…","ok");
   originalText = await f.text();
 
-  // render original immediately
   renderCode(origView, originalText);
   renderCode(newView, "");
 
-  // suggest output name
   const base = f.name.replace(/\.[^/.]+$/, "");
   const ext = (f.name.match(/\.[^/.]+$/) || [".nc"])[0];
   outnameEl.value = `${base}_new_and_working${ext}`;
@@ -591,17 +598,13 @@ convertBtn.addEventListener("click", () => {
 
   setStatus("Converting…","ok");
   logEl.textContent = "—";
-  pendingOutOfRange = null;
 
   try{
     const srcLines = originalText.split(/\r?\n/).map(l => l + "\n");
     const toolCalls = scanToolCalls(srcLines);
     const outOfRange = getOutOfRangeTools(toolCalls);
 
-    // Pause and ask for swaps if needed
     if (outOfRange.length > 0){
-      pendingOutOfRange = outOfRange;
-
       logEl.innerHTML = renderToolSwapUI(outOfRange);
       kpiWarnings.textContent = `Warnings: 1`;
       kpiChanged.textContent = `Changed lines: —`;
@@ -618,7 +621,6 @@ convertBtn.addEventListener("click", () => {
           swapMap[from] = to;
         });
 
-        // Run conversion with user-defined swaps
         try {
           const { out, log } = runConversionWithSwaps(swapMap);
           convertedText = out;
@@ -648,7 +650,6 @@ convertBtn.addEventListener("click", () => {
       return;
     }
 
-    // No out-of-range tools: run normal conversion
     const { out, log } = runConversionWithSwaps(null);
     convertedText = out;
 
@@ -694,7 +695,6 @@ clearBtn.addEventListener("click", () => {
   originalText = "";
   convertedText = "";
   convertedBlob = null;
-  pendingOutOfRange = null;
   convertBtn.disabled = true;
   downloadBtn.disabled = true;
   outnameEl.value = "";
