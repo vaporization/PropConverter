@@ -168,6 +168,11 @@
  *  - For every tool line, inject mandatory manual stops + M06Tnnmm (no spaces)
  *  - Normalize ending: M05 + M00 note + M30
  *
+ * NEW (Important):
+ *  - Prevent NCViewer “spiral/loop” artifacts by completing arc endpoints:
+ *    If a G02/G03 line is missing X or Z, inject the missing axis using last-known modal position.
+ *    Example: "G02 Z-42.268 R49.6" -> "G02 X23.955 Z-42.268 R49.6"
+ *
  * NOTE:
  * SolidWorks often uses G96/G99 and feed-per-rev values (like F.409).
  * To match proprietary style, we intentionally override to G97/G98 and
@@ -182,6 +187,11 @@ const ANY_TOOL_TOK_RE = /\b(?:M06\s*)?T(\d{2})(\d{2})\b/i;
 const PROPR_RPM = 3100;
 const PROPR_FEED_ROUGH = 420;
 const PROPR_FEED_FINISH = 270;
+
+// NEW: arc completion regexes (prevents NCViewer spiral)
+const ARC_RE = /\bG0?([23])\b/i; // G2/G02/G3/G03
+const AXIS_X_RE = /\bX\s*([+\-]?\d*\.?\d+)\b/i;
+const AXIS_Z_RE = /\bZ\s*([+\-]?\d*\.?\d+)\b/i;
 
 function pad2(n){ return String(n).padStart(2,"0"); }
 
@@ -259,6 +269,56 @@ function stripCutoffBlock(lines, log){
 }
 
 /**
+ * NEW: Complete missing arc endpoints to prevent NCViewer/controller ambiguity
+ * If a line has G02/G03 but is missing X or Z, inject missing axis using last-known modal X/Z.
+ */
+function completeArcEndpoints(lines, log){
+  let curX = null;
+  let curZ = null;
+  const out = [];
+
+  for (let i=0;i<lines.length;i++){
+    const raw = lines[i];
+    const line = raw.endsWith("\n") ? raw : raw + "\n";
+    const trimmed = line.trim();
+
+    // Skip pure comment/blank lines
+    if (trimmed === "" || trimmed.startsWith("(") || trimmed.startsWith(";")){
+      out.push(line);
+      continue;
+    }
+
+    // Track modal X/Z
+    const xMatch = trimmed.match(AXIS_X_RE);
+    const zMatch = trimmed.match(AXIS_Z_RE);
+    if (xMatch) curX = xMatch[1];
+    if (zMatch) curZ = zMatch[1];
+
+    if (ARC_RE.test(trimmed)){
+      const hasX = AXIS_X_RE.test(trimmed);
+      const hasZ = AXIS_Z_RE.test(trimmed);
+
+      const inject = [];
+      if (!hasX && curX != null) inject.push(`X${curX}`);
+      if (!hasZ && curZ != null) inject.push(`Z${curZ}`);
+
+      if (inject.length){
+        const updated = (trimmed + " " + inject.join(" "))
+          .replace(/\s+/g, " ")
+          .trim();
+        out.push(updated + "\n");
+        log.push(`Completed arc endpoint(s) on line ${i+1}: added ${inject.join(" ")}`);
+        continue;
+      }
+    }
+
+    out.push(line);
+  }
+
+  return out;
+}
+
+/**
  * Force proprietary spindle start flavor:
  * - Any line that contains M03 and an S-value gets replaced with "G97M03S3100"
  * - Also replace any G96 with G97 (even if line isn't a spindle start)
@@ -306,8 +366,8 @@ function forceProprietarySpindle(lines, log){
  * Implementation approach:
  * - Track a sectionMode = "rough"|"finish"
  * - When we see "( ...Finish... )" -> finish; "( ...Rough... )" -> rough
- * - For any line with G01/G02/G03 that contains an F token, replace entire feed chunk with "G98F###"
- * - Also if a line starts with "G99 G01 ..." we remove the leading G99 and rely on "G98F###"
+ * - For any line with G01/G02/G03 that contains an F token:
+ *     emit "G98F###" on its own line, then the motion line WITHOUT any leading G98/G99 token.
  */
 function forceProprietaryFeedFlavor(lines, log){
   const out = [];
@@ -334,26 +394,21 @@ function forceProprietaryFeedFlavor(lines, log){
       g99To98++;
     }
 
-    // If this is a cutting move and contains an F, force proprietary feed number
     const isCutMove = /\bG0?1\b|\bG0?2\b|\bG0?3\b/i.test(line);
     const hasFeed = /\bF\s*[+\-]?\d*\.?\d+\b/i.test(line);
 
     if (isCutMove && hasFeed){
       const feed = (section === "finish") ? PROPR_FEED_FINISH : PROPR_FEED_ROUGH;
 
-      // Replace any existing "G98Fxxx" OR "Fxxx" with "G98F###"
-      // Keep the rest of the line (axes, etc.)
-      // Also remove extra spaces to look more like proprietary (not perfectly, but closer).
-      line = line
-        .replace(/\bG9[89]\b\s*F\s*[+\-]?\d*\.?\d+\b/ig, "")  // remove existing feed-mode+feed combos
-        .replace(/\bF\s*[+\-]?\d*\.?\d+\b/ig, "")             // remove any remaining F tokens
+      // Strip any existing feed and any leading G98/G99 token on the motion line
+      let motion = line
+        .replace(/\bG9[89]\b/ig, "")                         // remove G98/G99 tokens from motion line
+        .replace(/\bF\s*[+\-]?\d*\.?\d+\b/ig, "")             // remove feed token
         .replace(/\s+/g, " ")
         .trim();
 
-      // Prepend G98F### (proprietary often does it as its own line, but putting it on same line is acceptable;
-      // however, to match proprietary more closely, we emit it as its own line right before the move.
       out.push(`G98F${feed}\n`);
-      out.push(line + "\n");
+      out.push(motion + "\n");
       feedRewrites++;
       continue;
     }
@@ -522,6 +577,9 @@ function runConversionWithSwaps(toolSwapMap){
   lines = lines.map(l => normalizeBILLET(l, log));
   lines = lines.map(l => removeG54(l, log));
   lines = replaceFarRetract(lines, log);
+
+  // NEW: fix incomplete arc endpoints before spindle/feed forcing
+  lines = completeArcEndpoints(lines, log);
 
   // Force proprietary spindle/feed flavor
   lines = forceProprietarySpindle(lines, log);
