@@ -167,10 +167,20 @@
  *     M05
  *     M00 (PROGRAM END - PART OFF BY HAND)
  *     M30
+ *
+ * NEW (Arc completion rule to avoid goofy loops in NCViewer/some controls):
+ * - For any G02/G03 arc line that is missing an X or Z endpoint:
+ *     inject the missing axis using the last-known modal position
+ *   Example: "G02 Z-42.268 R49.6" -> "G02 X24.899 Z-42.268 R49.6" (if current X=24.899)
  */
 
 const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
 const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
+
+// NEW: arc detection
+const ARC_RE = /\bG0?([23])\b/i;         // matches G2/G02/G3/G03
+const AXIS_X_RE = /\bX\s*([+\-]?\d*\.?\d+)\b/i;
+const AXIS_Z_RE = /\bZ\s*([+\-]?\d*\.?\d+)\b/i;
 
 function pad2(n){ return String(n).padStart(2,"0"); }
 
@@ -277,6 +287,67 @@ function ensureProgramEnd(lines, log){
   lines.push("M30\n");
   log.push("Normalized ending: M05, M00 (end note), M30");
   return lines;
+}
+
+/**
+ * NEW: Arc completion rule
+ * - Tracks last-known X/Z positions (modal) through the program
+ * - If a line contains G02/G03 and is missing X or Z, inject the missing endpoint
+ *   using the current modal position.
+ *
+ * Notes:
+ * - We only consider "real motion" lines (not comments).
+ * - If we have not yet seen a value for the missing axis, we leave the line unchanged.
+ * - We preserve the rest of the line, just appending/adding missing tokens.
+ */
+function completeArcEndpoints(lines, log){
+  let curX = null;
+  let curZ = null;
+
+  const out = [];
+
+  for (let i=0;i<lines.length;i++){
+    const original = lines[i];
+    const line = original.endsWith("\n") ? original : original + "\n";
+    const trimmed = line.trim();
+
+    // Track X/Z when present (even on non-arc moves)
+    const xMatch = trimmed.match(AXIS_X_RE);
+    const zMatch = trimmed.match(AXIS_Z_RE);
+    if (xMatch) curX = xMatch[1];
+    if (zMatch) curZ = zMatch[1];
+
+    // Skip pure comment lines
+    if (trimmed.startsWith("(") || trimmed.startsWith(";") || trimmed === ""){
+      out.push(line);
+      continue;
+    }
+
+    // If it's an arc command
+    if (ARC_RE.test(trimmed)){
+      const hasX = AXIS_X_RE.test(trimmed);
+      const hasZ = AXIS_Z_RE.test(trimmed);
+
+      // Only inject if missing AND we know the current modal value
+      let updated = trimmed;
+      const inject = [];
+
+      if (!hasX && curX != null) inject.push(`X${curX}`);
+      if (!hasZ && curZ != null) inject.push(`Z${curZ}`);
+
+      if (inject.length > 0){
+        // Insert at end (safe, doesn't change meaning)
+        updated = `${trimmed} ${inject.join(" ")}`.replace(/\s+/g, " ").trim();
+        out.push(updated + "\n");
+        log.push(`Completed arc endpoint(s) on line ${i+1}: added ${inject.join(" ")}`);
+        continue;
+      }
+    }
+
+    out.push(line);
+  }
+
+  return out;
 }
 
 /** ---------- Tool swap UI + logic ---------- */
@@ -389,6 +460,11 @@ function runConversionWithSwaps(toolSwapMap){
   lines = lines.map(l => normalizeBILLET(l, log));
   lines = lines.map(l => removeG54(l, log));
   lines = replaceFarRetract(lines, log);
+
+  // NEW: fix arc endpoints before we strip blocks / insert tool stops
+  // (so the modal tracking sees the original motion ordering)
+  lines = completeArcEndpoints(lines, log);
+
   lines = stripCutoffBlock(lines, log);
   lines = insertManualStopsForceM06NoSpace(lines, log);
   lines = ensureProgramEnd(lines, log);
@@ -404,6 +480,8 @@ function runConversionWithSwaps(toolSwapMap){
     }
   }
   if (nRemovedCount > 0) deduped.unshift(`Removed N line numbers (N###) from ${nRemovedCount} line(s)`);
+
+  // (Optional) You could also dedupe arc logs if you want, but leaving them helps debug.
 
   return { out: lines.join(""), log: deduped };
 }
