@@ -150,47 +150,61 @@
 
 <script>
 /**
- * ========= Conversion rules =========
- * - Remove N line numbers (N1, N2, N70, etc.) from the converted file
- * - Convert "[BILLET ..." -> "(BILLET ...)"
- * - Remove G54 tokens
- * - Replace any line containing X508 and Z127 with:
- *     M09
- *     G28 U0 W0
- * - Remove cutoff/part-off block (since you part off by hand)
- * - If out-of-range tools are found (anything not 01–08), prompt the user to SWAP them to a tool 01–08
- * - For every tool line, inject:
- *     M05
- *     M00 (...)  (manual stop)
- *     M06Tnnmm   (NO SPACE, matches proprietary style)
- * - Normalize program ending:
- *     M05
- *     M00 (PROGRAM END - PART OFF BY HAND)
- *     M30
+ * ========= Goal =========
+ * Make SolidWorks exports come out with the same “flavor” as the proprietary QuickTURN output.
  *
- * NEW (Arc completion rule to avoid goofy loops in NCViewer/some controls):
- * - For any G02/G03 arc line that is missing an X or Z endpoint:
- *     inject the missing axis using the last-known modal position
- *   Example: "G02 Z-42.268 R49.6" -> "G02 X24.899 Z-42.268 R49.6" (if current X=24.899)
+ * Proprietary flavor we force:
+ *  - Spindle start:     G97M03S3100  (no spaces)
+ *  - Feed mode:         G98 (feed/min)
+ *  - Rough feed:        G98F420
+ *  - Finish feed:       G98F270
+ *  - Remove B90. lines
+ *  - Remove N-line numbers
+ *  - Convert [BILLET …] to (BILLET …)
+ *  - Remove G54 tokens
+ *  - Replace X508/Z127 retract with: M09 + G28 U0 W0
+ *  - Strip cutoff/part-off block (you part off by hand)
+ *  - Tool-range handling: if tool > 08, let user swap to 01–08
+ *  - For every tool line, inject mandatory manual stops + M06Tnnmm (no spaces)
+ *  - Normalize ending: M05 + M00 note + M30
+ *
+ * NOTE:
+ * SolidWorks often uses G96/G99 and feed-per-rev values (like F.409).
+ * To match proprietary style, we intentionally override to G97/G98 and
+ * set F to either 420 (rough) or 270 (finish) via a deterministic heuristic.
  */
 
 const TOOL_LINE_RE = /^\s*(?:M06\s*)?T(\d{2})(\d{2})\s*$/i;
 const HAS_BILLET_RE = /^\s*\[BILLET\b/i;
 
-// NEW: arc detection
-const ARC_RE = /\bG0?([23])\b/i;         // matches G2/G02/G3/G03
-const AXIS_X_RE = /\bX\s*([+\-]?\d*\.?\d+)\b/i;
-const AXIS_Z_RE = /\bZ\s*([+\-]?\d*\.?\d+)\b/i;
+const ANY_TOOL_TOK_RE = /\b(?:M06\s*)?T(\d{2})(\d{2})\b/i;
+
+const PROPR_RPM = 3100;
+const PROPR_FEED_ROUGH = 420;
+const PROPR_FEED_FINISH = 270;
 
 function pad2(n){ return String(n).padStart(2,"0"); }
 
 function stripNLineNumber(line, log){
-  // Remove leading N-codes like: "N1 ..." "N70..." "N0030 ..."
-  // Only at start of line (ignoring whitespace), and only if followed by whitespace or end.
   const before = line;
   const after = line.replace(/^\s*N\d+\s*/i, "");
   if (after !== before) log.push("Removed N line number (N###) from start of line");
   return after;
+}
+
+function stripB90(lines, log){
+  const out = [];
+  let removed = 0;
+  for (const raw of lines){
+    const t = raw.trim().toUpperCase();
+    if (t === "B90." || t === "B90" || t === "B90.0" || t === "B90.00"){
+      removed++;
+      continue;
+    }
+    out.push(raw);
+  }
+  if (removed) log.push(`Removed B90 lines (${removed}) to match proprietary output`);
+  return out;
 }
 
 function normalizeBILLET(line, log){
@@ -233,7 +247,6 @@ function stripCutoffBlock(lines, log){
     }
   }
 
-  // fallback: late T0707/T0909-ish tool call (rare)
   if (startIdx === null) {
     for (let i=lines.length-1;i>=0;i--){
       if (/^\s*(?:M06\s*)?T(07|09)(07|09)\s*$/i.test(lines[i])) { startIdx = i; break; }
@@ -243,6 +256,114 @@ function stripCutoffBlock(lines, log){
   if (startIdx === null) return lines;
   log.push("Removed cutoff/part-off block (you’re parting off by hand)");
   return lines.slice(0, startIdx);
+}
+
+/**
+ * Force proprietary spindle start flavor:
+ * - Any line that contains M03 and an S-value gets replaced with "G97M03S3100"
+ * - Also replace any G96 with G97 (even if line isn't a spindle start)
+ */
+function forceProprietarySpindle(lines, log){
+  const out = [];
+  let changedStarts = 0;
+  let g96To97 = 0;
+
+  for (let raw of lines){
+    let line = raw;
+
+    if (/\bG96\b/i.test(line)){
+      line = line.replace(/\bG96\b/ig, "G97");
+      g96To97++;
+    }
+
+    // Replace spindle-start style lines like: "G00 G96 S548 M03" or "G96 S548 M03" or "G97 M03 Sxxxx"
+    // with proprietary: "G97M03S3100"
+    if (/\bM0?3\b/i.test(line) && /\bS\s*\d+(\.\d+)?\b/i.test(line)){
+      // avoid touching comments
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("(") && !trimmed.startsWith(";")){
+        line = `G97M03S${PROPR_RPM}\n`;
+        changedStarts++;
+      }
+    }
+
+    out.push(line.endsWith("\n") ? line : line + "\n");
+  }
+
+  if (g96To97) log.push(`Converted G96→G97 on ${g96To97} line(s) (match proprietary RPM mode)`);
+  if (changedStarts) log.push(`Forced spindle start to proprietary style on ${changedStarts} line(s): G97M03S${PROPR_RPM}`);
+  return out;
+}
+
+/**
+ * Force proprietary feed flavor:
+ * - Convert any G99 tokens to G98
+ * - Convert any SolidWorks feed values (Fxxx) on cutting moves to:
+ *     Rough:  G98F420
+ *     Finish: G98F270
+ *   using heuristic: if we're inside a "Finish" section label comment, treat as finish
+ *
+ * Implementation approach:
+ * - Track a sectionMode = "rough"|"finish"
+ * - When we see "( ...Finish... )" -> finish; "( ...Rough... )" -> rough
+ * - For any line with G01/G02/G03 that contains an F token, replace entire feed chunk with "G98F###"
+ * - Also if a line starts with "G99 G01 ..." we remove the leading G99 and rely on "G98F###"
+ */
+function forceProprietaryFeedFlavor(lines, log){
+  const out = [];
+  let section = "rough";
+  let g99To98 = 0;
+  let feedRewrites = 0;
+
+  for (let raw of lines){
+    let line = raw;
+
+    // Section detection via comments (your SolidWorks export already has these)
+    const t = line.trim();
+    if (t.startsWith("(") && t.endsWith(")")){
+      const u = t.toUpperCase();
+      if (u.includes("FINISH")) section = "finish";
+      if (u.includes("ROUGH")) section = "rough";
+      out.push(line.endsWith("\n") ? line : line + "\n");
+      continue;
+    }
+
+    // Convert G99 to G98 anywhere
+    if (/\bG99\b/i.test(line)){
+      line = line.replace(/\bG99\b/ig, "G98");
+      g99To98++;
+    }
+
+    // If this is a cutting move and contains an F, force proprietary feed number
+    const isCutMove = /\bG0?1\b|\bG0?2\b|\bG0?3\b/i.test(line);
+    const hasFeed = /\bF\s*[+\-]?\d*\.?\d+\b/i.test(line);
+
+    if (isCutMove && hasFeed){
+      const feed = (section === "finish") ? PROPR_FEED_FINISH : PROPR_FEED_ROUGH;
+
+      // Replace any existing "G98Fxxx" OR "Fxxx" with "G98F###"
+      // Keep the rest of the line (axes, etc.)
+      // Also remove extra spaces to look more like proprietary (not perfectly, but closer).
+      line = line
+        .replace(/\bG9[89]\b\s*F\s*[+\-]?\d*\.?\d+\b/ig, "")  // remove existing feed-mode+feed combos
+        .replace(/\bF\s*[+\-]?\d*\.?\d+\b/ig, "")             // remove any remaining F tokens
+        .replace(/\s+/g, " ")
+        .trim();
+
+      // Prepend G98F### (proprietary often does it as its own line, but putting it on same line is acceptable;
+      // however, to match proprietary more closely, we emit it as its own line right before the move.
+      out.push(`G98F${feed}\n`);
+      out.push(line + "\n");
+      feedRewrites++;
+      continue;
+    }
+
+    out.push(line.endsWith("\n") ? line : line + "\n");
+  }
+
+  if (g99To98) log.push(`Converted G99→G98 on ${g99To98} line(s) (match proprietary feed mode)`);
+  if (feedRewrites) log.push(`Forced proprietary feeds on ${feedRewrites} cutting move(s): rough=${PROPR_FEED_ROUGH}, finish=${PROPR_FEED_FINISH}`);
+  return out;
 }
 
 function insertManualStopsForceM06NoSpace(lines, log){
@@ -267,7 +388,6 @@ function insertManualStopsForceM06NoSpace(lines, log){
         log.push(`Inserted mandatory manual tool-change stop (Tool ${tool})`);
       }
 
-      // IMPORTANT: proprietary style, NO SPACE:
       out.push(`M06T${pad2(tool)}${pad2(off)}\n`);
       continue;
     }
@@ -287,67 +407,6 @@ function ensureProgramEnd(lines, log){
   lines.push("M30\n");
   log.push("Normalized ending: M05, M00 (end note), M30");
   return lines;
-}
-
-/**
- * NEW: Arc completion rule
- * - Tracks last-known X/Z positions (modal) through the program
- * - If a line contains G02/G03 and is missing X or Z, inject the missing endpoint
- *   using the current modal position.
- *
- * Notes:
- * - We only consider "real motion" lines (not comments).
- * - If we have not yet seen a value for the missing axis, we leave the line unchanged.
- * - We preserve the rest of the line, just appending/adding missing tokens.
- */
-function completeArcEndpoints(lines, log){
-  let curX = null;
-  let curZ = null;
-
-  const out = [];
-
-  for (let i=0;i<lines.length;i++){
-    const original = lines[i];
-    const line = original.endsWith("\n") ? original : original + "\n";
-    const trimmed = line.trim();
-
-    // Track X/Z when present (even on non-arc moves)
-    const xMatch = trimmed.match(AXIS_X_RE);
-    const zMatch = trimmed.match(AXIS_Z_RE);
-    if (xMatch) curX = xMatch[1];
-    if (zMatch) curZ = zMatch[1];
-
-    // Skip pure comment lines
-    if (trimmed.startsWith("(") || trimmed.startsWith(";") || trimmed === ""){
-      out.push(line);
-      continue;
-    }
-
-    // If it's an arc command
-    if (ARC_RE.test(trimmed)){
-      const hasX = AXIS_X_RE.test(trimmed);
-      const hasZ = AXIS_Z_RE.test(trimmed);
-
-      // Only inject if missing AND we know the current modal value
-      let updated = trimmed;
-      const inject = [];
-
-      if (!hasX && curX != null) inject.push(`X${curX}`);
-      if (!hasZ && curZ != null) inject.push(`Z${curZ}`);
-
-      if (inject.length > 0){
-        // Insert at end (safe, doesn't change meaning)
-        updated = `${trimmed} ${inject.join(" ")}`.replace(/\s+/g, " ").trim();
-        out.push(updated + "\n");
-        log.push(`Completed arc endpoint(s) on line ${i+1}: added ${inject.join(" ")}`);
-        continue;
-      }
-    }
-
-    out.push(line);
-  }
-
-  return out;
 }
 
 /** ---------- Tool swap UI + logic ---------- */
@@ -449,27 +508,33 @@ function runConversionWithSwaps(toolSwapMap){
   const log = [];
   let lines = originalText.split(/\r?\n/).map(l => l + "\n");
 
-  // Apply user swaps first
   if (toolSwapMap){
     lines = applyToolSwapsToLines(lines, toolSwapMap, log);
   }
 
-  // Remove N line numbers early so everything downstream sees clean lines
+  // Remove N codes first
   lines = lines.map(l => stripNLineNumber(l, log));
 
+  // Remove B90 lines (not in proprietary)
+  lines = stripB90(lines, log);
+
+  // Convert [BILLET], remove G54, replace retracts
   lines = lines.map(l => normalizeBILLET(l, log));
   lines = lines.map(l => removeG54(l, log));
   lines = replaceFarRetract(lines, log);
 
-  // NEW: fix arc endpoints before we strip blocks / insert tool stops
-  // (so the modal tracking sees the original motion ordering)
-  lines = completeArcEndpoints(lines, log);
+  // Force proprietary spindle/feed flavor
+  lines = forceProprietarySpindle(lines, log);
+  lines = forceProprietaryFeedFlavor(lines, log);
 
+  // Remove cutoff block and inject manual tool change stops
   lines = stripCutoffBlock(lines, log);
   lines = insertManualStopsForceM06NoSpace(lines, log);
+
+  // Ensure ending
   lines = ensureProgramEnd(lines, log);
 
-  // Deduplicate spammy "Removed N line number..." messages
+  // Deduplicate spammy N-removal messages
   const deduped = [];
   let nRemovedCount = 0;
   for (const entry of log){
@@ -480,8 +545,6 @@ function runConversionWithSwaps(toolSwapMap){
     }
   }
   if (nRemovedCount > 0) deduped.unshift(`Removed N line numbers (N###) from ${nRemovedCount} line(s)`);
-
-  // (Optional) You could also dedupe arc logs if you want, but leaving them helps debug.
 
   return { out: lines.join(""), log: deduped };
 }
